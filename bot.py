@@ -76,7 +76,7 @@ async def create_dynamic_room():
 async def main(args):
     # Banner to verify code version in logs
     print(f"\n{'='*40}")
-    print(f"🚀 QUADRIGA BOT v2.2 (Pipecat 0.0.100)")
+    print(f"🚀 QUADRIGA BOT v2.3 (Token Support)")
     print(f"{'='*40}\n")
 
     try:
@@ -85,9 +85,11 @@ async def main(args):
         logger.error(str(e))
         return
 
+    # UPDATED: Pass args.token to the transport. 
+    # This is critical for Cloud Sandbox which sends a token for authentication.
     transport = DailyTransport(
         room_url=daily_url,
-        token=None,
+        token=args.token,  # <--- FIXED: Use the token passed by the runner
         bot_name="Quadriga",
         params=DailyParams(
             audio_out_enabled=True,
@@ -121,7 +123,6 @@ async def main(args):
 
     pipeline = Pipeline([transport.input(), rtvi, llm, transport.output()])
 
-    # UPDATED: Removed allow_interruptions=True (Deprecated in 0.0.100)
     task = PipelineTask(
         pipeline,
         params=PipelineParams(enable_metrics=True),
@@ -170,6 +171,8 @@ async def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Quadriga Agent")
     parser.add_argument("-u", "--url", type=str, help="Room URL (Passed by Pipecat Cloud)")
+    # UPDATED: Added token argument to prevent crash in Cloud Runner
+    parser.add_argument("-t", "--token", type=str, help="Daily Room Token (Passed by Pipecat Cloud)")
     args = parser.parse_args()
 
     asyncio.run(main(args))

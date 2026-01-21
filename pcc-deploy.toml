@@ -4,5 +4,5 @@ image_credentials = "my-docker-secret"
 secret_set = "quickstart-secrets"
 
 [scaling]
-min_agents = 1
+min_agents = 0
 max_agents = 1
