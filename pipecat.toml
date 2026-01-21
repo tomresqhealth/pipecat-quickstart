@@ -1,4 +1,4 @@
 [agent]
-name = "teaching-agent-mvp"
-image = "tomresqhealth/teaching-agent-mvp:0.2"
+name = "quadriga-on-100"
+image = "tomresqhealth/quadriga-on-100:v1"
 entrypoint = "bot.py"
