@@ -1,0 +1,8 @@
+agent_name = "teaching-agent-mvp"
+image = "tomresqhealth/quadriga:latest"
+image_credentials = "my-docker-secret"
+secret_set = "quickstart-secrets"
+
+[scaling]
+min_agents = 1
+max_agents = 1

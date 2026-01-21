@@ -1,0 +1,4 @@
+[agent]
+name = "teaching-agent-mvp"
+image = "tomresqhealth/teaching-agent-mvp:0.2"
+entrypoint = "bot.py"
