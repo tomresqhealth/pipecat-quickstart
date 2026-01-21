@@ -23,4 +23,4 @@ line-length = 100
 select = ["I"]
 
 [tool.uv.sources]
-pipecat-ai = { git = "https://github.com/pipecat-ai/pipecat.git", rev = "v0.0.99" }
+pipecat-ai = { git = "https://github.com/pipecat-ai/pipecat.git", rev = "v0.0.100" }
