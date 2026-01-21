@@ -76,7 +76,7 @@ async def create_dynamic_room():
 async def main(args):
     # Banner to verify code version in logs
     print(f"\n{'='*40}")
-    print(f"🚀 QUADRIGA BOT v2.1 (Syntax Fix)")
+    print(f"🚀 QUADRIGA BOT v2.2 (Pipecat 0.0.100)")
     print(f"{'='*40}\n")
 
     try:
@@ -121,16 +121,15 @@ async def main(args):
 
     pipeline = Pipeline([transport.input(), rtvi, llm, transport.output()])
 
+    # UPDATED: Removed allow_interruptions=True (Deprecated in 0.0.100)
     task = PipelineTask(
         pipeline,
-        params=PipelineParams(allow_interruptions=True, enable_metrics=True),
+        params=PipelineParams(enable_metrics=True),
     )
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info(f"Client connected to {daily_url}")
-        
-        # --- FIX: Define payload variables separately to avoid syntax errors ---
         
         # 1. Prepare Bot Ready Signal
         rtvi_payload = {
@@ -146,7 +145,6 @@ async def main(args):
         await task.queue_frames([OutputTransportMessageFrame(message=rtvi_payload)])
 
         # 2. Prepare Greeting
-        # Use triple quotes to avoid syntax errors if GREETING_TEXT has single quotes
         greeting_content = f"""The user has joined. Say exactly this: "{GREETING_TEXT}" """
         messages = [{"role": "user", "content": greeting_content}]
         await task.queue_frames([LLMMessagesAppendFrame(messages)])
