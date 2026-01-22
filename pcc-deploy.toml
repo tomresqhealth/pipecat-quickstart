@@ -1,5 +1,6 @@
 agent_name = "quadriga-on-100"
 image = "tomresqhealth/quadriga-on-100:v2"
+image_credentials = "my-dockerhub-creds"
 secret_set = "quickstart-secrets"
 
 [scaling]
