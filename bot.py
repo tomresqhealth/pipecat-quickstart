@@ -1,9 +1,7 @@
+# bot.py
 import os
 import sys
 import asyncio
-import time
-import aiohttp
-import argparse
 from loguru import logger
 from dotenv import load_dotenv
 
@@ -16,88 +14,43 @@ from pipecat.pipeline.task import PipelineTask, PipelineParams
 from pipecat.processors.frameworks.rtvi import RTVIProcessor, RTVIConfig
 from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService, InputParams
 from pipecat.transports.daily.transport import DailyTransport, DailyParams
+from pipecat.audio.vad.silero import SileroVADAnalyzer
 
 from prompts import SYSTEM_PROMPT, GREETING_TEXT
 
 logger.remove()
 logger.add(sys.stderr, level="DEBUG")
 
-# --- ROOM CONFIGURATION ---
-async def configure_daily_room(args):
-    # Debug: Print everything we received so we can see it in the Cloud Logs
-    logger.info(f"🔍 DEBUG: Sys Args: {sys.argv}")
-    logger.info(f"🔍 DEBUG: Daily Env Var: {os.getenv('DAILY_ROOM_URL')}")
-
-    # 1. Check Command Line Argument (Standard Cloud Method)
-    if args.url:
-        logger.info(f"🎯 Using URL from Args: {args.url}")
-        return args.url
-
-    # 2. Check Environment Variable (Fallback Cloud Method)
-    if os.getenv("DAILY_ROOM_URL"):
-        logger.info(f"🎯 Using URL from Env Var: {os.getenv('DAILY_ROOM_URL')}")
-        return os.getenv("DAILY_ROOM_URL")
-
-    # 3. Local Dynamic Generation (Fallback for Local Testing)
-    logger.info("⚠️ No Cloud URL found. Falling back to Local Dynamic Room.")
-    return await create_dynamic_room()
-
-async def create_dynamic_room():
-    api_key = os.getenv("DAILY_API_KEY")
-    if not api_key:
-        raise ValueError("Error: DAILY_API_KEY is missing. Cannot create room.")
-
-    logger.info("✨ Creating a new dynamic room for this session...")
-    async with aiohttp.ClientSession() as session:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        # Create a room that expires in 1 hour
-        data = {
-            "properties": {
-                "exp": int(time.time() + 3600),
-                "eject_at_room_exp": True
-            }
-        }
-        
-        async with session.post("https://api.daily.co/v1/rooms", headers=headers, json=data) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise ValueError(f"Failed to create Daily room: {text}")
-            
-            room_data = await resp.json()
-            new_url = room_data["url"]
-            logger.info(f"Successfully created dynamic room: {new_url}")
-            return new_url
-
-# ----------------------------------------------------
-
-async def main(args):
-    # Banner to verify code version in logs
+async def bot(args):
+    """
+    Main entry point for the bot.
+    The 'args' object is provided by the Pipecat runner and contains 
+    the room_url and token, regardless of whether you are running locally
+    or on Pipecat Cloud.
+    """
     print(f"\n{'='*40}")
-    print(f"🚀 QUADRIGA BOT v2.3 (Token Support)")
+    print(f"🚀 QUADRIGA BOT (Dual Mode)")
     print(f"{'='*40}\n")
 
-    try:
-        daily_url = await configure_daily_room(args)
-    except ValueError as e:
-        logger.error(str(e))
-        return
-
-    # UPDATED: Pass args.token to the transport. 
-    # This is critical for Cloud Sandbox which sends a token for authentication.
+    logger.info(f"🎯 Room URL: {args.room_url}")
+    
+    # Transport setup
+    # Note: We added SileroVADAnalyzer as suggested by the HelpBot. 
+    # This significantly improves interruption handling.
     transport = DailyTransport(
-        room_url=daily_url,
-        token=args.token,  # <--- FIXED: Use the token passed by the runner
+        room_url=args.room_url,
+        token=args.token,
         bot_name="Quadriga",
         params=DailyParams(
             audio_out_enabled=True,
             transcription_enabled=False,
-            audio_in_enabled=True
+            audio_in_enabled=True,
+            vad_enabled=True,
+            vad_analyzer=SileroVADAnalyzer()
         )
     )
 
+    # LLM Setup - Preserving your specific configuration
     llm = GeminiLiveLLMService(
         api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
         model="models/gemini-2.5-flash-native-audio-preview-12-2025",
@@ -115,7 +68,7 @@ async def main(args):
         )
     )
 
-    # RTVI: Critical for Pipecat Cloud UI to recognize the bot
+    # RTVI: Critical for Pipecat Cloud UI
     rtvi = RTVIProcessor(config=RTVIConfig(
         config=[], 
         enable_bot_ready_message=True 
@@ -130,9 +83,9 @@ async def main(args):
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info(f"Client connected to {daily_url}")
+        logger.info(f"Client connected")
         
-        # 1. Prepare Bot Ready Signal
+        # 1. Bot Ready Signal (RTVI)
         rtvi_payload = {
             "type": "bot-ready", 
             "label": "Quadriga", 
@@ -145,7 +98,7 @@ async def main(args):
         }
         await task.queue_frames([OutputTransportMessageFrame(message=rtvi_payload)])
 
-        # 2. Prepare Greeting
+        # 2. Initial Greeting
         greeting_content = f"""The user has joined. Say exactly this: "{GREETING_TEXT}" """
         messages = [{"role": "user", "content": greeting_content}]
         await task.queue_frames([LLMMessagesAppendFrame(messages)])
@@ -169,10 +122,7 @@ async def main(args):
         logger.info("Pipeline task cancelled. Exiting cleanly.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Quadriga Agent")
-    parser.add_argument("-u", "--url", type=str, help="Room URL (Passed by Pipecat Cloud)")
-    # UPDATED: Added token argument to prevent crash in Cloud Runner
-    parser.add_argument("-t", "--token", type=str, help="Daily Room Token (Passed by Pipecat Cloud)")
-    args = parser.parse_args()
-
-    asyncio.run(main(args))
+    # This acts as a bridge. When run locally, it sets up the environment.
+    # When deployed, Pipecat Cloud calls the 'bot' function directly.
+    from pipecat.runner.run import main
+    main()
