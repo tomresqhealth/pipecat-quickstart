@@ -1,5 +1,5 @@
 agent_name = "quadriga-on-100"
-image = "tomresqhealth/quadriga-on-100:v1"
+image = "tomresqhealth/quadriga-on-100:v2"
 secret_set = "quickstart-secrets"
 
 [scaling]
