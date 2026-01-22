@@ -1,4 +1,4 @@
 [agent]
 name = "quadriga-on-100"
-image = "tomresqhealth/quadriga-on-100:v2"
+image = "tomresqhealth/quadriga-on-100:v10.0.1"
 entrypoint = "bot.py"
