@@ -14,6 +14,9 @@ ENV UV_COMPILE_BYTECODE=1
 # Copy from the cache instead of linking since it's a mounted volume
 ENV UV_LINK_MODE=copy
 
+# --- THE FIX: Bind to all interfaces for cloud deployment ---
+ENV HOST=0.0.0.0
+
 # Install the project's dependencies using the lockfile and settings
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
@@ -27,7 +30,4 @@ ENV PATH="/app/.venv/bin:$PATH"
 COPY ./prompts.py prompts.py
 COPY ./bot.py bot.py
 
-# --- THE FIX IS HERE ---
-# Use ENTRYPOINT so the Cloud Runner can append arguments (like -u URL)
-# safely without overwriting the command.
 ENTRYPOINT ["python", "bot.py"]
