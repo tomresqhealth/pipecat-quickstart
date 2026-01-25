@@ -7,8 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Added LLMMessagesAppendFrame to imports
-from pipecat.frames.frames import LLMRunFrame, LLMMessagesAppendFrame
+from pipecat.frames.frames import LLMMessagesAppendFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineTask, PipelineParams
@@ -19,7 +18,6 @@ from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService, InputP
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.runner.types import DailyRunnerArguments, SmallWebRTCRunnerArguments, RunnerArguments
 
-# Importing your prompts
 from prompts import SYSTEM_PROMPT, GREETING_TEXT
 
 logger.remove()
@@ -32,7 +30,8 @@ async def bot(args: RunnerArguments):
 
     transport = None
     client_connected = False
-    RECONNECT_GRACE_PERIOD = 30  # seconds
+    greeting_triggered = False  # Prevent double greetings
+    RECONNECT_GRACE_PERIOD = 30
 
     # --- 1. Detect Transport Type ---
     if isinstance(args, DailyRunnerArguments):
@@ -47,7 +46,7 @@ async def bot(args: RunnerArguments):
             bot_name="Quadriga",
             params=DailyParams(
                 audio_out_enabled=True,
-                transcription_enabled=False, # We rely on Gemini for transcription
+                transcription_enabled=False,
                 audio_in_enabled=True,
                 vad_enabled=True,
                 vad_analyzer=SileroVADAnalyzer()
@@ -79,7 +78,7 @@ async def bot(args: RunnerArguments):
         model="models/gemini-2.5-flash-native-audio-preview-12-2025",
         voice_id="Charon", 
         transcribe_user_audio=True,
-        system_instruction=SYSTEM_PROMPT, 
+        system_instruction=SYSTEM_PROMPT,
         params=InputParams(
             generation_config={
                 "max_output_tokens": 180,
@@ -92,14 +91,11 @@ async def bot(args: RunnerArguments):
     )
 
     # --- 3. Pipeline Setup ---
-    # We initialize context with just the system prompt.
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-    ]
+    # Empty messages - system prompt is already in LLM config
+    messages = []
     context = LLMContext(messages)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
 
-    # RTVI Processor
     rtvi = RTVIProcessor(config=RTVIConfig(
         config=[], 
         enable_bot_ready_message=True 
@@ -122,10 +118,12 @@ async def bot(args: RunnerArguments):
     # --- 4. Event Handlers ---
 
     async def trigger_greeting():
-        """
-        Uses LLMMessagesAppendFrame to properly inject the greeting trigger into the pipeline.
-        We use 'role': 'user' to ensure Gemini Live respects the instruction mid-session.
-        """
+        nonlocal greeting_triggered
+        if greeting_triggered:
+            logger.info("Greeting already triggered, skipping")
+            return
+        greeting_triggered = True
+        
         logger.info(f"Triggering greeting: {GREETING_TEXT}")
         await task.queue_frames([
             LLMMessagesAppendFrame(
@@ -133,26 +131,24 @@ async def bot(args: RunnerArguments):
                     "role": "user", 
                     "content": f"Please say exactly this text, then wait for my reply: {GREETING_TEXT}"
                 }],
-                run_llm=True # This automatically triggers the generation
+                run_llm=True
             )
         ])
 
-    # Handler for RTVI clients (Local/Sandbox)
+    # Handler for RTVI clients (Local SmallWebRTC and Sandbox)
     @rtvi.event_handler("on_client_ready")
     async def on_client_ready(rtvi):
         logger.info("Client ready (RTVI) - sending bot ready")
         await rtvi.set_bot_ready()
         await trigger_greeting()
 
-    # Handler for Daily URL clients (Cloud/API)
-    @transport.event_handler("on_first_participant_joined")
-    async def on_first_participant_joined(transport, participant):
-        logger.info(f"First participant joined: {participant['id']}")
-        
-        # REQUIRED: Capture participant audio so VAD works for interruptions
-        await transport.capture_participant_transcription(participant["id"])
-        
-        await trigger_greeting()
+    # Handler for Daily URL clients (direct browser join, non-RTVI)
+    if isinstance(args, DailyRunnerArguments):
+        @transport.event_handler("on_first_participant_joined")
+        async def on_first_participant_joined(transport, participant):
+            logger.info(f"First participant joined: {participant['id']}")
+            await transport.capture_participant_transcription(participant["id"])
+            await trigger_greeting()
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
