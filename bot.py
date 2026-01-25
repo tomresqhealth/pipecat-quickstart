@@ -7,7 +7,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from pipecat.frames.frames import LLMRunFrame
+# Added LLMMessagesAppendFrame to imports
+from pipecat.frames.frames import LLMRunFrame, LLMMessagesAppendFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineTask, PipelineParams
@@ -18,6 +19,7 @@ from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService, InputP
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.runner.types import DailyRunnerArguments, SmallWebRTCRunnerArguments, RunnerArguments
 
+# Importing your prompts
 from prompts import SYSTEM_PROMPT, GREETING_TEXT
 
 logger.remove()
@@ -32,7 +34,7 @@ async def bot(args: RunnerArguments):
     client_connected = False
     RECONNECT_GRACE_PERIOD = 30  # seconds
 
-    # 1. Detect Transport Type
+    # --- 1. Detect Transport Type ---
     if isinstance(args, DailyRunnerArguments):
         from pipecat.transports.daily.transport import DailyTransport, DailyParams
 
@@ -45,7 +47,7 @@ async def bot(args: RunnerArguments):
             bot_name="Quadriga",
             params=DailyParams(
                 audio_out_enabled=True,
-                transcription_enabled=False,
+                transcription_enabled=False, # We rely on Gemini for transcription
                 audio_in_enabled=True,
                 vad_enabled=True,
                 vad_analyzer=SileroVADAnalyzer()
@@ -71,7 +73,7 @@ async def bot(args: RunnerArguments):
         logger.error(f"Unsupported runner arguments type: {type(args)}")
         return
 
-    # LLM Setup
+    # --- 2. LLM Setup ---
     llm = GeminiLiveLLMService(
         api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
         model="models/gemini-2.5-flash-native-audio-preview-12-2025",
@@ -89,7 +91,8 @@ async def bot(args: RunnerArguments):
         )
     )
 
-    # Context setup for conversation history
+    # --- 3. Pipeline Setup ---
+    # We initialize context with just the system prompt.
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
     ]
@@ -116,18 +119,40 @@ async def bot(args: RunnerArguments):
         params=PipelineParams(enable_metrics=True),
     )
 
-    # --- Event Handlers ---
+    # --- 4. Event Handlers ---
 
+    async def trigger_greeting():
+        """
+        Uses LLMMessagesAppendFrame to properly inject the greeting trigger into the pipeline.
+        We use 'role': 'user' to ensure Gemini Live respects the instruction mid-session.
+        """
+        logger.info(f"Triggering greeting: {GREETING_TEXT}")
+        await task.queue_frames([
+            LLMMessagesAppendFrame(
+                messages=[{
+                    "role": "user", 
+                    "content": f"Please say exactly this text, then wait for my reply: {GREETING_TEXT}"
+                }],
+                run_llm=True # This automatically triggers the generation
+            )
+        ])
+
+    # Handler for RTVI clients (Local/Sandbox)
     @rtvi.event_handler("on_client_ready")
     async def on_client_ready(rtvi):
-        logger.info("Client ready - sending bot ready")
+        logger.info("Client ready (RTVI) - sending bot ready")
         await rtvi.set_bot_ready()
+        await trigger_greeting()
+
+    # Handler for Daily URL clients (Cloud/API)
+    @transport.event_handler("on_first_participant_joined")
+    async def on_first_participant_joined(transport, participant):
+        logger.info(f"First participant joined: {participant['id']}")
         
-        messages.append({
-            "role": "system", 
-            "content": f"Say exactly this greeting: \"{GREETING_TEXT}\""
-        })
-        await task.queue_frames([LLMRunFrame()])
+        # REQUIRED: Capture participant audio so VAD works for interruptions
+        await transport.capture_participant_transcription(participant["id"])
+        
+        await trigger_greeting()
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
