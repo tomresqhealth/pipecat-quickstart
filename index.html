@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>1KWords Agent</title>
+    <script src="https://unpkg.com/@daily-co/daily-js"></script>
+    <style>
+        body { margin: 0; font-family: sans-serif; background: #222; color: white; overflow: hidden; }
+        
+        /* The Video Container */
+        #call-container {
+            width: 100vw; height: 100vh;
+            position: relative;
+        }
+
+        /* The Lightbox (Hidden by default) */
+        #lightbox {
+            display: none; /* HIDDEN until triggered */
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 80%; max-width: 600px;
+            background: white;
+            padding: 10px;
+            border-radius: 12px;
+            box-shadow: 0 0 50px rgba(0,0,0,0.8);
+            z-index: 999;
+            text-align: center;
+        }
+        #lightbox img { 
+            width: 100%; 
+            border-radius: 8px; 
+            display: block;
+        }
+        #close-btn {
+            margin-top: 10px;
+            padding: 10px 20px;
+            background: #ff4444; 
+            color: white; 
+            border: none; 
+            border-radius: 4px; 
+            cursor: pointer;
+            font-size: 16px;
+        }
+        #close-btn:hover { background: #cc0000; }
+    </style>
+</head>
+<body>
+
+    <div id="call-container"></div>
+
+    <div id="lightbox">
+        <img id="instructional-image" src="" alt="Instructional Aid" />
+        <br/>
+        <button id="close-btn" onclick="closeLightbox()">Close Image</button>
+    </div>
+
+    <script>
+        // --- CONFIGURATION ---
+        // 1. Log in to your Daily Dashboard.
+        // 2. Copy the URL of your room (e.g. "https://resqhealth.daily.co/quadriga-agent-test")
+        // 3. Paste it inside the quotes below:
+        const ROOM_URL = "https://resqhealth.daily.co/quadriga-agent-test"; 
+
+        let callFrame = null;
+
+        async function startCall() {
+            // Create the video call iframe
+            callFrame = window.DailyIframe.createFrame(
+                document.getElementById('call-container'), {
+                    showLeaveButton: true,
+                    iframeStyle: { width: '100%', height: '100%', border: '0' }
+                }
+            );
+
+            // LISTENER: Watch for the Agent's signal
+            callFrame.on('app-message', (e) => {
+                // Log for debugging
+                console.log("Received app-message:", e.data);
+
+                // We check if the message event is 'show_image'
+                if (e.data && e.data.event === 'show_image') {
+                    showLightbox(e.data.url);
+                }
+            });
+
+            try {
+                await callFrame.join({ url: ROOM_URL });
+                console.log("Joined room:", ROOM_URL);
+            } catch (err) {
+                console.error("Failed to join room. Check your ROOM_URL.", err);
+            }
+        }
+
+        // Helper functions to show/hide the image
+        function showLightbox(url) {
+            const box = document.getElementById('lightbox');
+            const img = document.getElementById('instructional-image');
+            
+            // Set source and make visible
+            img.src = url;
+            box.style.display = 'block'; 
+        }
+
+        function closeLightbox() {
+            document.getElementById('lightbox').style.display = 'none';
+        }
+
+        // Start immediately on page load
+        startCall();
+    </script>
+</body>
+</html>
