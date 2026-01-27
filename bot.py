@@ -19,8 +19,9 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService, InputParams
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams # <--- NEW IMPORT
 from pipecat.runner.types import DailyRunnerArguments, SmallWebRTCRunnerArguments, RunnerArguments
-from pipecat.services.llm_service import FunctionCallParams # <--- NEW IMPORT
+from pipecat.services.llm_service import FunctionCallParams 
 
 from pipecat.transports.daily.transport import (
     DailyTransport, 
@@ -66,6 +67,15 @@ async def bot(args: RunnerArguments):
     greeting_triggered = False
 
     # --- TRANSPORT SETUP ---
+    # We increase start_secs to 0.5 (default 0.2) to stop short noises from interrupting
+    vad_analyzer = SileroVADAnalyzer(
+        params=VADParams(
+            start_secs=0.5, 
+            stop_secs=0.8,
+            confidence=0.7
+        )
+    )
+
     if isinstance(args, DailyRunnerArguments):
         logger.info(f"📹 Mode: Daily (Cloud/URL) -> {args.room_url}")
         
@@ -77,8 +87,7 @@ async def bot(args: RunnerArguments):
                 audio_out_enabled=True,
                 transcription_enabled=False,
                 audio_in_enabled=True,
-                # vad_enabled=True, <--- REMOVED (Deprecated)
-                vad_analyzer=SileroVADAnalyzer()
+                vad_analyzer=vad_analyzer
             )
         )
 
@@ -89,7 +98,11 @@ async def bot(args: RunnerArguments):
         
         transport = SmallWebRTCTransport(
             webrtc_connection=args.webrtc_connection,
-            params=TransportParams(audio_out_enabled=True, audio_in_enabled=True, vad_analyzer=SileroVADAnalyzer())
+            params=TransportParams(
+                audio_out_enabled=True, 
+                audio_in_enabled=True, 
+                vad_analyzer=vad_analyzer
+            )
         )
 
     # --- LLM SETUP ---
@@ -127,12 +140,10 @@ async def bot(args: RunnerArguments):
         transport.input(), rtvi, user_aggregator, llm, transport.output(), assistant_aggregator
     ])
 
-    # 1. CREATE TASK FIRST
     task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True))
 
-    # 2. DEFINE HANDLER (Now it can see `task`)
+    # 2. DEFINE HANDLER
     async def show_image_handler(params: FunctionCallParams):
-        # We extract args from the new params object
         function_name = params.function_name
         args = params.arguments
         
@@ -146,26 +157,21 @@ async def bot(args: RunnerArguments):
         image_url = image_db.get(keyword, "https://placehold.co/600x400?text=Image+Not+Found")
 
         try:
-            # Create the frame
             frame = DailyOutputTransportMessageFrame(
                 message={"event": "show_image", "url": image_url}
             )
-            
-            # THE FIX: Queue the frame on the pipeline task
-            # This pushes the frame into the stream, which flows to transport.output()
             await task.queue_frames([frame])
-            
             logger.info(f"📡 Sent App Message Frame: {image_url}")
             
         except Exception as e:
             logger.error(f"❌ Failed to send frame: {e}")
         
-        # Note: You don't need to call result_callback manually anymore if you return the result string
-        # However, to maintain the conversation flow properly via the LLM service:
+        # Kept your original return style since you confirmed it works
         return f"Displaying image of {keyword}."
 
     # 3. REGISTER FUNCTION
-    llm.register_function("show_image", show_image_handler)
+    # We keep cancel_on_interruption=False to protect the tool once it DOES start
+    llm.register_function("show_image", show_image_handler, cancel_on_interruption=False)
 
     # --- GREETING & RUNNER ---
     async def trigger_greeting():
