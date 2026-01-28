@@ -19,9 +19,10 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService, InputParams
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADParams # <--- NEW IMPORT
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.runner.types import DailyRunnerArguments, SmallWebRTCRunnerArguments, RunnerArguments
-from pipecat.services.llm_service import FunctionCallParams 
+from pipecat.services.llm_service import FunctionCallParams
+from pipecat.processors.frame_processor import FrameDirection 
 
 from pipecat.transports.daily.transport import (
     DailyTransport, 
@@ -29,7 +30,9 @@ from pipecat.transports.daily.transport import (
     DailyOutputTransportMessageFrame 
 )
 
-from prompts import SYSTEM_PROMPT, GREETING_TEXT
+# --- IMPORTS FROM MODULES ---
+from prompts import SYSTEM_PROMPT, GREETING_TEXT, VISUAL_INSTRUCTIONS
+from images import get_image_url
 
 logger.remove()
 logger.add(sys.stderr, level="DEBUG")
@@ -42,16 +45,24 @@ tools = [
         "function_declarations": [
             {
                 "name": "show_image",
-                "description": "Display an image to the user. Use this specifically when the user asks to see a person or an object.",
+                "description": "Display an image to the user based on a specific keyword.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "keyword": {
                             "type": "string",
-                            "description": "The specific item to show. Options: 'tom_elliott'."
+                            "description": "The specific item key to show (e.g. 'birthday', 'headshot', 'fenway_park')."
                         }
                     },
                     "required": ["keyword"]
+                }
+            },
+            {
+                "name": "close_image",
+                "description": "Close the currently displayed image.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
                 }
             }
         ]
@@ -67,12 +78,13 @@ async def bot(args: RunnerArguments):
     greeting_triggered = False
 
     # --- TRANSPORT SETUP ---
-    # We increase start_secs to 0.5 (default 0.2) to stop short noises from interrupting
+    # Stricter VAD settings to prevent background noise interruptions
     vad_analyzer = SileroVADAnalyzer(
         params=VADParams(
-            start_secs=0.5, 
-            stop_secs=0.8,
-            confidence=0.7
+            start_secs=0.5,      
+            stop_secs=1.2,       # Slightly reduced from 1.5 for better responsiveness
+            confidence=0.8,      
+            min_volume=0.8       
         )
     )
 
@@ -106,14 +118,16 @@ async def bot(args: RunnerArguments):
         )
 
     # --- LLM SETUP ---
-    VISUAL_INSTRUCTIONS = """
-    # VISUAL AID INSTRUCTIONS
-    You have a tool called 'show_image'.
-    - If the user asks "Can you show me a picture of Tom Elliott?" -> Call 'show_image' with keyword 'tom_elliott'.
-    - If the user asks "Who is Tom?" or "What does Tom look like?" -> Call the tool.
-    """
-    
     combined_system_prompt = SYSTEM_PROMPT + VISUAL_INSTRUCTIONS
+
+    # Define safety settings to prevent "Policy Violation" disconnects
+    # This fixes the 1008 error that killed your previous session
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
 
     llm = GeminiLiveLLMService(
         api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
@@ -126,7 +140,8 @@ async def bot(args: RunnerArguments):
             generation_config={
                 "response_modalities": ["AUDIO"],
                 "temperature": 0.0,
-            }
+            },
+            safety_settings=safety_settings # <--- APPLIED HERE
         )
     )
 
@@ -142,36 +157,45 @@ async def bot(args: RunnerArguments):
 
     task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True))
 
-    # 2. DEFINE HANDLER
+    # --- HANDLERS ---
     async def show_image_handler(params: FunctionCallParams):
         function_name = params.function_name
         args = params.arguments
         
         logger.info(f"🎨 Tool Triggered: {function_name} with {args}")
         
-        image_db = {
-            "tom_elliott": "https://nutum.ai/wp-content/uploads/2025/03/tom-headshot-2024.jpeg"
-        }
-
         keyword = args.get("keyword", "").lower()
-        image_url = image_db.get(keyword, "https://placehold.co/600x400?text=Image+Not+Found")
+        image_url = get_image_url(keyword)
 
         try:
             frame = DailyOutputTransportMessageFrame(
                 message={"event": "show_image", "url": image_url}
             )
-            await task.queue_frames([frame])
+            # FIX: Send directly to transport output to bypass LLM blocking
+            await transport.output().process_frame(frame, FrameDirection.DOWNSTREAM)
             logger.info(f"📡 Sent App Message Frame: {image_url}")
             
         except Exception as e:
             logger.error(f"❌ Failed to send frame: {e}")
         
-        # Kept your original return style since you confirmed it works
-        return f"Displaying image of {keyword}."
+        return f"Displaying image for {keyword}."
 
-    # 3. REGISTER FUNCTION
-    # We keep cancel_on_interruption=False to protect the tool once it DOES start
+    async def close_image_handler(params: FunctionCallParams):
+        logger.info("❌ Tool Triggered: close_image")
+        try:
+            frame = DailyOutputTransportMessageFrame(
+                message={"event": "close_image"}
+            )
+            # FIX: Send directly to transport output to bypass LLM blocking
+            await transport.output().process_frame(frame, FrameDirection.DOWNSTREAM)
+            logger.info("📡 Sent App Message Frame: close_image")
+        except Exception as e:
+            logger.error(f"❌ Failed to send frame: {e}")
+        return "Image closed."
+
+    # REGISTER FUNCTIONS
     llm.register_function("show_image", show_image_handler, cancel_on_interruption=False)
+    llm.register_function("close_image", close_image_handler, cancel_on_interruption=False)
 
     # --- GREETING & RUNNER ---
     async def trigger_greeting():

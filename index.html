@@ -79,9 +79,16 @@
                 // Log for debugging
                 console.log("Received app-message:", e.data);
 
-                // We check if the message event is 'show_image'
-                if (e.data && e.data.event === 'show_image') {
+                if (!e.data) return;
+
+                // Handle showing the image
+                if (e.data.event === 'show_image') {
                     showLightbox(e.data.url);
+                }
+
+                // Handle closing the image (NEW)
+                if (e.data.event === 'close_image') {
+                    closeLightbox();
                 }
             });
 
