@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>1KWords Agent</title>
+    <title>Quadriga Agent (Dynamic Video)</title>
     <script src="https://unpkg.com/@daily-co/daily-js"></script>
     <style>
         body { margin: 0; font-family: sans-serif; background: #222; color: white; overflow: hidden; }
@@ -14,27 +14,53 @@
             position: relative;
         }
 
-        /* The Lightbox (Hidden by default) */
-        #lightbox {
+        /* The Content Overlay (Images & Video) */
+        #media-overlay {
             display: none; /* HIDDEN until triggered */
             position: absolute;
             top: 50%; left: 50%;
             transform: translate(-50%, -50%);
-            width: 80%; max-width: 600px;
-            background: white;
-            padding: 10px;
+            width: 80%; max-width: 800px;
+            
+            /* --- HEIGHT CONSTRAINTS (New) --- */
+            /* Never taller than 700px OR 90% of the viewport, whichever is smaller */
+            max-height: min(700px, 90vh);
+            
+            background: rgba(0,0,0,0.9);
+            padding: 20px;
             border-radius: 12px;
             box-shadow: 0 0 50px rgba(0,0,0,0.8);
             z-index: 999;
             text-align: center;
+            flex-direction: column;
+            align-items: center;
+            
+            /* Ensure content respects the rounded corners and doesn't spill */
+            overflow: hidden;
+            /* Allow vertical scrolling only if absolutely necessary (e.g. tiny screens) */
+            overflow-y: auto; 
         }
-        #lightbox img { 
-            width: 100%; 
+
+        #instructional-image, #instructional-video {
+            /* --- MEDIA SCALING (New) --- */
+            /* Reset width to auto to preserve aspect ratio */
+            width: auto;
+            max-width: 100%;
+            
+            /* Constrain height to leave room for the 'Close' button */
+            /* (700px container - padding - button space ~= 550px max) */
+            max-height: 550px;
+            
+            /* Also constrain relative to viewport for small screens */
+            max-height: 60vh;
+            
+            object-fit: contain;
             border-radius: 8px; 
-            display: block;
+            display: none; /* Toggled via JS */
         }
+
         #close-btn {
-            margin-top: 10px;
+            margin-top: 15px;
             padding: 10px 20px;
             background: #ff4444; 
             color: white; 
@@ -42,31 +68,50 @@
             border-radius: 4px; 
             cursor: pointer;
             font-size: 16px;
+            /* Prevent button from shrinking */
+            flex-shrink: 0;
         }
         #close-btn:hover { background: #cc0000; }
+        
+        /* Status indicator for voice commands */
+        #status-log {
+            position: absolute;
+            bottom: 20px; right: 20px;
+            color: #aaa; font-size: 12px;
+            background: rgba(0,0,0,0.5);
+            padding: 5px;
+            border-radius: 4px;
+            pointer-events: none;
+        }
     </style>
 </head>
 <body>
 
     <div id="call-container"></div>
 
-    <div id="lightbox">
+    <div id="media-overlay">
         <img id="instructional-image" src="" alt="Instructional Aid" />
+        
+        <video id="instructional-video" controls>
+            <source src="" type="video/mp4">
+            Your browser does not support the video tag.
+        </video>
+
         <br/>
-        <button id="close-btn" onclick="closeLightbox()">Close Image</button>
+        <button id="close-btn" onclick="closeOverlay()">Close Media</button>
     </div>
+
+    <div id="status-log">Ready</div>
 
     <script>
         // --- CONFIGURATION ---
-        // 1. Log in to your Daily Dashboard.
-        // 2. Copy the URL of your room (e.g. "https://resqhealth.daily.co/quadriga-agent-test")
-        // 3. Paste it inside the quotes below:
         const ROOM_URL = "https://resqhealth.daily.co/quadriga-agent-test"; 
 
         let callFrame = null;
+        let lastCommandTime = 0;
+        const DEBOUNCE_MS = 1000; 
 
         async function startCall() {
-            // Create the video call iframe
             callFrame = window.DailyIframe.createFrame(
                 document.getElementById('call-container'), {
                     showLeaveButton: true,
@@ -76,19 +121,26 @@
 
             // LISTENER: Watch for the Agent's signal
             callFrame.on('app-message', (e) => {
-                // Log for debugging
-                console.log("Received app-message:", e.data);
-
                 if (!e.data) return;
+                
+                console.log("Received app-message:", e.data);
+                updateStatus(`Received: ${e.data.event} ${e.data.command || ''}`);
 
-                // Handle showing the image
                 if (e.data.event === 'show_image') {
-                    showLightbox(e.data.url);
+                    showImage(e.data.url);
                 }
 
-                // Handle closing the image (NEW)
+                // Handle Dynamic Video URL
+                if (e.data.event === 'show_video') {
+                    showVideo(e.data.url); 
+                }
+
                 if (e.data.event === 'close_image') {
-                    closeLightbox();
+                    closeOverlay();
+                }
+
+                if (e.data.event === 'video_control') {
+                    handleVideoControl(e.data.command);
                 }
             });
 
@@ -100,21 +152,99 @@
             }
         }
 
-        // Helper functions to show/hide the image
-        function showLightbox(url) {
-            const box = document.getElementById('lightbox');
-            const img = document.getElementById('instructional-image');
+        // --- VIDEO CONTROL LOGIC ---
+        function handleVideoControl(command) {
+            const video = document.getElementById('instructional-video');
+            const overlay = document.getElementById('media-overlay');
             
-            // Set source and make visible
+            // Ensure video is visible if we are controlling it
+            if (overlay.style.display === 'none') {
+                console.warn("Received control command but video is hidden.");
+                return;
+            }
+
+            const now = Date.now();
+
+            switch (command) {
+                case 'pause':
+                    video.pause();
+                    break;
+                case 'play':
+                case 'resume': 
+                    video.play();
+                    break;
+                case 'restart':  // Handle Restart
+                    video.currentTime = 0;
+                    video.play();
+                    break;
+                case 'mute':
+                    video.muted = true;
+                    break;
+                case 'unmute':
+                    video.muted = false;
+                    break;
+                case 'skip':
+                case 'forward':
+                    if (now - lastCommandTime > DEBOUNCE_MS) {
+                        video.currentTime += 10;
+                        lastCommandTime = now;
+                    } 
+                    break;
+                case 'rewind':
+                case 'back':
+                    if (now - lastCommandTime > DEBOUNCE_MS) {
+                        video.currentTime -= 10;
+                        lastCommandTime = now;
+                    } 
+                    break;
+            }
+        }
+
+        // --- UI HELPERS ---
+        function showImage(url) {
+            const box = document.getElementById('media-overlay');
+            const img = document.getElementById('instructional-image');
+            const vid = document.getElementById('instructional-video');
+            
+            // Stop any playing video
+            vid.pause();
+            vid.style.display = 'none';
+
             img.src = url;
-            box.style.display = 'block'; 
+            img.style.display = 'block';
+            box.style.display = 'flex'; 
         }
 
-        function closeLightbox() {
-            document.getElementById('lightbox').style.display = 'none';
+        function showVideo(url) {
+            const box = document.getElementById('media-overlay');
+            const img = document.getElementById('instructional-image');
+            const vid = document.getElementById('instructional-video');
+
+            img.style.display = 'none';
+            vid.style.display = 'block';
+            
+            if (url) {
+                vid.src = url;
+            }
+            vid.play().catch(e => console.log("Auto-play blocked:", e));
+            
+            box.style.display = 'flex';
         }
 
-        // Start immediately on page load
+        function closeOverlay() {
+            const box = document.getElementById('media-overlay');
+            const vid = document.getElementById('instructional-video');
+            
+            vid.pause();
+            box.style.display = 'none';
+        }
+        
+        function updateStatus(text) {
+            const el = document.getElementById('status-log');
+            el.textContent = text;
+            setTimeout(() => el.textContent = "Ready", 3000);
+        }
+
         startCall();
     </script>
 </body>

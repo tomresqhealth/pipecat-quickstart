@@ -25,9 +25,14 @@ def get_image_url(keyword: str) -> str:
     Retrieves the URL for a given keyword. 
     Defaults to a placeholder if the key doesn't exist.
     """
-    data = IMAGE_DATABASE.get(keyword.lower())
+    # Normalize key to lower case to prevent mismatch errors
+    key = keyword.lower().strip()
+    data = IMAGE_DATABASE.get(key)
+    
     if data:
         return data["url"]
+    
+    # Fallback image if the LLM hallucinates a keyword
     return "https://placehold.co/600x400?text=Image+Not+Found"
 
 def get_image_descriptions() -> str:
