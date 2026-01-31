@@ -4,11 +4,11 @@ version = "0.1.0"
 description = "Quickstart example for building voice AI bots with Pipecat"
 requires-python = ">=3.10"
 dependencies = [
-    "pipecat-ai[cartesia,daily,deepgram,google,local-smart-turn-v3,openai,runner,silero,webrtc]",
     "pipecat-ai-cli",
     "python-dotenv>=1.2.1",
     "google-generativeai>=0.8.6",
     "google-genai>=1.57.0",
+    "pipecat-ai[daily,google,silero]==0.0.101",
 ]
 
 [dependency-groups]
@@ -21,6 +21,3 @@ dev = [
 line-length = 100
 [tool.ruff.lint]
 select = ["I"]
-
-[tool.uv.sources]
-pipecat-ai = { git = "https://github.com/pipecat-ai/pipecat.git", rev = "v0.0.100" }

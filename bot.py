@@ -16,14 +16,22 @@ from pipecat.frames.frames import (
     TextFrame, 
     LLMFullResponseEndFrame,
     UserStartedSpeakingFrame,
-    UserStoppedSpeakingFrame
+    UserStoppedSpeakingFrame,
+    EndFrame
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineTask, PipelineParams
 from pipecat.processors.frameworks.rtvi import RTVIProcessor, RTVIConfig
+
+# ✅ FIXED IMPORTS FOR v0.0.101
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.processors.aggregators.llm_response import LLMAssistantContextAggregator
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMUserAggregator, 
+    LLMUserAggregatorParams
+)
+
 from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService, InputParams
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
@@ -78,32 +86,22 @@ class IntentFallbackProcessor(FrameProcessor):
         super().__init__()
         
         self.intent_patterns = [
-            # Basic Controls
             (re.compile(r"\bpausing\s*(?:the\s+)?video\b", re.IGNORECASE), "pause", None),
             (re.compile(r"\bresuming\s*(?:the\s+)?video\b", re.IGNORECASE), "play", None),
             (re.compile(r"\bmuting\s*(?:the\s+)?video\b", re.IGNORECASE), "mute", None),
             (re.compile(r"\bunmuting\s*(?:the\s+)?video\b", re.IGNORECASE), "unmute", None),
             (re.compile(r"\brestarting\s*(?:the\s+)?video\b", re.IGNORECASE), "restart", None),
-            
-            # Relative Navigation
             (re.compile(r"\bskipping\s*forward\b", re.IGNORECASE), "skip", None),
             (re.compile(r"\brewinding\s*(?:the\s+)?video\b", re.IGNORECASE), "rewind", None),
-            
-            # Speed Controls - "Voice Macros"
-            # Slow
             (re.compile(r"\bslow(?:ing)?\s*down\b", re.IGNORECASE), "speed", 0.5),
             (re.compile(r"\bhalf\s*speed\b", re.IGNORECASE), "speed", 0.5),
             (re.compile(r"\b0?\.5x?\b", re.IGNORECASE), "speed", 0.5),
             (re.compile(r"\bquarter\s*speed\b", re.IGNORECASE), "speed", 0.25),
             (re.compile(r"\b0?\.25x?\b", re.IGNORECASE), "speed", 0.25),
-            
-            # Fast
             (re.compile(r"\bspeed(?:ing)?\s*up\b", re.IGNORECASE), "speed", 1.5),
             (re.compile(r"\bfast\s*forward\b", re.IGNORECASE), "speed", 1.5),
             (re.compile(r"\bdouble\s*speed\b", re.IGNORECASE), "speed", 2.0),
-            (re.compile(r"\b2(?:\.0)?x\b", re.IGNORECASE), "speed", 2.0), # Matches "2x" or "2.0x"
-            
-            # Normal
+            (re.compile(r"\b2(?:\.0)?x\b", re.IGNORECASE), "speed", 2.0), 
             (re.compile(r"\bnormal\s*speed\b", re.IGNORECASE), "speed", 1.0),
             (re.compile(r"\b1x\s*speed\b", re.IGNORECASE), "speed", 1.0),
         ]
@@ -201,6 +199,8 @@ async def bot(args: RunnerArguments):
 
     if isinstance(args, DailyRunnerArguments):
         logger.info(f"📹 Mode: Daily (Cloud/URL) -> {args.room_url}")
+        
+        # CHANGED: No vad_analyzer passed here in v0.0.101
         transport = DailyTransport(
             room_url=args.room_url,
             token=args.token,
@@ -209,19 +209,22 @@ async def bot(args: RunnerArguments):
                 audio_out_enabled=True,
                 transcription_enabled=False,
                 audio_in_enabled=True,
-                vad_analyzer=vad_analyzer
+                vad_enabled=True,            
+                vad_audio_passthrough=True   
             )
         )
     elif isinstance(args, SmallWebRTCRunnerArguments):
         from pipecat.transports.base_transport import TransportParams
         from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
         logger.info(f"💻 Mode: SmallWebRTC (Local)")
+        
         transport = SmallWebRTCTransport(
             webrtc_connection=args.webrtc_connection,
             params=TransportParams(
                 audio_out_enabled=True, 
                 audio_in_enabled=True, 
-                vad_analyzer=vad_analyzer
+                vad_enabled=True, 
+                vad_audio_passthrough=True
             )
         )
 
@@ -270,7 +273,17 @@ TRIGGER PHRASES (Speak these exactly):
     # --- PIPELINE SETUP ---
     messages = []
     context = LLMContext(messages)
-    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
+    
+    # ✅ FIXED AGGREGATORS (v0.0.101)
+    # 1. User side: Uses Universal Aggregator + VAD params
+    user_aggregator = LLMUserAggregator(
+        context,
+        params=LLMUserAggregatorParams(vad_analyzer=vad_analyzer)
+    )
+
+    # 2. Assistant side: Uses Context Aggregator (avoids the 'append' crash)
+    assistant_aggregator = LLMAssistantContextAggregator(context)
+    
     rtvi = RTVIProcessor(config=RTVIConfig(config=[], enable_bot_ready_message=True))
     
     fallback_processor = IntentFallbackProcessor()
@@ -356,10 +369,6 @@ TRIGGER PHRASES (Speak these exactly):
     async def on_app_message(transport, message, sender):
         if message.get("event") == "video_ended":
             logger.info("🎬 Video finished. Forcing conversation.")
-            
-            # FIXED: We use the "USER" role to impersonate the user asking "What now?".
-            # This forces Gemini (the model) to generate an audio response.
-            # Using TTSSpeakFrame failed because we don't have a TTS service.
             await task.queue_frames([
                 LLMMessagesAppendFrame(
                     messages=[{
@@ -401,6 +410,12 @@ TRIGGER PHRASES (Speak these exactly):
         async def on_first_participant_joined(transport, participant):
             await transport.capture_participant_transcription(participant["id"])
             await trigger_greeting()
+
+        # ✅ NUCLEAR EXIT HANDLER: Kills process immediately
+        @transport.event_handler("on_participant_left")
+        async def on_participant_left(transport, participant, reason):
+            logger.info(f"User left: {participant}. Terminating.")
+            os._exit(0)
 
     runner = PipelineRunner()
     await runner.run(task)
