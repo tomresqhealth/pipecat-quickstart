@@ -14,7 +14,9 @@ load_dotenv()
 from pipecat.frames.frames import (
     LLMMessagesAppendFrame, 
     TextFrame, 
-    LLMFullResponseEndFrame
+    LLMFullResponseEndFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -43,24 +45,68 @@ logger.remove()
 logger.add(sys.stderr, level="DEBUG")
 
 # -------------------------------------------------------------------------
-# INTENT FALLBACK PROCESSOR (The "Eavesdropper")
+# 1. CLIENT STATE NOTIFIER (Audio Ducking)
+# -------------------------------------------------------------------------
+class ClientStateNotifier(FrameProcessor):
+    def __init__(self):
+        super().__init__()
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, UserStartedSpeakingFrame):
+            msg = DailyOutputTransportMessageFrame(message={
+                "event": "user_speaking_status", 
+                "status": "speaking"
+            })
+            await self.push_frame(msg, direction)
+            
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            msg = DailyOutputTransportMessageFrame(message={
+                "event": "user_speaking_status", 
+                "status": "stopped"
+            })
+            await self.push_frame(msg, direction)
+
+        await self.push_frame(frame, direction)
+
+# -------------------------------------------------------------------------
+# 2. INTENT FALLBACK PROCESSOR (The "Eavesdropper" Safety Net)
 # -------------------------------------------------------------------------
 class IntentFallbackProcessor(FrameProcessor):
     def __init__(self):
         super().__init__()
-        # UPDATED REGEX: More robust patterns
-        # \s* = optional whitespace
-        # (?:the\s+)? = optional word "the"
-        # We also added "restart" as a distinct intent
-        self.intents = {
-            "pause": re.compile(r"\bpausing\s*(?:the\s+)?video\b", re.IGNORECASE),
-            "play": re.compile(r"\bresuming\s*(?:the\s+)?video\b", re.IGNORECASE),
-            "mute": re.compile(r"\bmuting\s*(?:the\s+)?video\b", re.IGNORECASE),
-            "unmute": re.compile(r"\bunmuting\s*(?:the\s+)?video\b", re.IGNORECASE),
-            "skip": re.compile(r"\bskipping\s*forward\b", re.IGNORECASE),
-            "rewind": re.compile(r"\brewinding\s*(?:the\s+)?video\b", re.IGNORECASE),
-            "restart": re.compile(r"\brestarting\s*(?:the\s+)?video\b", re.IGNORECASE)
-        }
+        
+        self.intent_patterns = [
+            # Basic Controls
+            (re.compile(r"\bpausing\s*(?:the\s+)?video\b", re.IGNORECASE), "pause", None),
+            (re.compile(r"\bresuming\s*(?:the\s+)?video\b", re.IGNORECASE), "play", None),
+            (re.compile(r"\bmuting\s*(?:the\s+)?video\b", re.IGNORECASE), "mute", None),
+            (re.compile(r"\bunmuting\s*(?:the\s+)?video\b", re.IGNORECASE), "unmute", None),
+            (re.compile(r"\brestarting\s*(?:the\s+)?video\b", re.IGNORECASE), "restart", None),
+            
+            # Relative Navigation
+            (re.compile(r"\bskipping\s*forward\b", re.IGNORECASE), "skip", None),
+            (re.compile(r"\brewinding\s*(?:the\s+)?video\b", re.IGNORECASE), "rewind", None),
+            
+            # Speed Controls - "Voice Macros"
+            # Slow
+            (re.compile(r"\bslow(?:ing)?\s*down\b", re.IGNORECASE), "speed", 0.5),
+            (re.compile(r"\bhalf\s*speed\b", re.IGNORECASE), "speed", 0.5),
+            (re.compile(r"\b0?\.5x?\b", re.IGNORECASE), "speed", 0.5),
+            (re.compile(r"\bquarter\s*speed\b", re.IGNORECASE), "speed", 0.25),
+            (re.compile(r"\b0?\.25x?\b", re.IGNORECASE), "speed", 0.25),
+            
+            # Fast
+            (re.compile(r"\bspeed(?:ing)?\s*up\b", re.IGNORECASE), "speed", 1.5),
+            (re.compile(r"\bfast\s*forward\b", re.IGNORECASE), "speed", 1.5),
+            (re.compile(r"\bdouble\s*speed\b", re.IGNORECASE), "speed", 2.0),
+            (re.compile(r"\b2(?:\.0)?x\b", re.IGNORECASE), "speed", 2.0), # Matches "2x" or "2.0x"
+            
+            # Normal
+            (re.compile(r"\bnormal\s*speed\b", re.IGNORECASE), "speed", 1.0),
+            (re.compile(r"\b1x\s*speed\b", re.IGNORECASE), "speed", 1.0),
+        ]
         self._triggered_intents = set()
 
     async def process_frame(self, frame, direction):
@@ -71,19 +117,15 @@ class IntentFallbackProcessor(FrameProcessor):
 
         if isinstance(frame, TextFrame):
             text = frame.text
-            
-            for action, pattern in self.intents.items():
-                if action not in self._triggered_intents and pattern.search(text):
-                    logger.info(f"🕵️ Eavesdropper detected STRICT intent: '{action}' in text: '{text}'")
+            for pattern, command, value in self.intent_patterns:
+                if command not in self._triggered_intents and pattern.search(text):
+                    logger.info(f"🕵️ Eavesdropper Safety Net: Detected '{command}' (val={value}) in text: '{text}'")
+                    msg_payload = {"event": "video_control", "command": command, "source": "fallback_processor"}
+                    if value is not None:
+                        msg_payload["value"] = value
                     
-                    msg = DailyOutputTransportMessageFrame(message={
-                        "event": "video_control", 
-                        "command": action,
-                        "source": "fallback_processor"
-                    })
-                    await self.push_frame(msg, direction)
-                    self._triggered_intents.add(action)
-                    # No break, allows multiple commands in one turn
+                    await self.push_frame(DailyOutputTransportMessageFrame(message=msg_payload), direction)
+                    self._triggered_intents.add(command)
 
         await self.push_frame(frame, direction)
 
@@ -99,24 +141,18 @@ tools = [
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "keyword": {
-                            "type": "string",
-                            "description": "The specific item key to show (e.g. 'birthday', 'headshot', 'fenway_park')."
-                        }
+                        "keyword": { "type": "string", "description": "Image keyword (e.g. 'birthday')." }
                     },
                     "required": ["keyword"]
                 }
             },
             {
                 "name": "show_video",
-                "description": "Display and play a video. Use 'skiing' if the user asks for a generic video or skiing.",
+                "description": "Display and play a video.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "keyword": {
-                            "type": "string",
-                            "description": "The specific video key to show (e.g. 'skiing'). Defaults to 'skiing' if unspecified."
-                        }
+                        "keyword": { "type": "string", "description": "Video keyword (e.g. 'skiing')." }
                     },
                     "required": ["keyword"]
                 }
@@ -124,20 +160,22 @@ tools = [
             {
                 "name": "close_image",
                 "description": "Close the currently displayed image or video.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                }
+                "parameters": { "type": "object", "properties": {} }
             },
             {
                 "name": "control_video",
-                "description": "Control video playback (pause, play, mute, unmute, skip, rewind, restart).",
+                "description": "Control video playback (pause, play, seek, speed).",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["pause", "play", "mute", "unmute", "skip", "rewind", "restart"]
+                            "enum": ["pause", "play", "mute", "unmute", "restart", "seek", "speed"],
+                            "description": "The action to perform."
+                        },
+                        "value": {
+                            "type": "number",
+                            "description": "For 'seek': seconds (negative=back). For 'speed': playback rate (e.g. 0.25, 0.5, 1.0, 1.5, 2.0)."
                         }
                     },
                     "required": ["action"]
@@ -149,25 +187,20 @@ tools = [
 
 async def bot(args: RunnerArguments):
     print(f"\n{'='*40}")
-    print(f"🤖 QUADRIGA BOT (Robust Control)")
+    print(f"🤖 QUADRIGA BOT (Enhanced)")
     print(f"{'='*40}\n")
 
     transport = None
     greeting_triggered = False
 
     # --- TRANSPORT SETUP ---
+    # Relaxed VAD settings to prevent cutting off complex commands
     vad_analyzer = SileroVADAnalyzer(
-        params=VADParams(
-            start_secs=0.2,      
-            stop_secs=0.8,       
-            confidence=0.7,      
-            min_volume=0.6       
-        )
+        params=VADParams(start_secs=0.2, stop_secs=1.5, confidence=0.7, min_volume=0.6)
     )
 
     if isinstance(args, DailyRunnerArguments):
         logger.info(f"📹 Mode: Daily (Cloud/URL) -> {args.room_url}")
-        
         transport = DailyTransport(
             room_url=args.room_url,
             token=args.token,
@@ -179,12 +212,10 @@ async def bot(args: RunnerArguments):
                 vad_analyzer=vad_analyzer
             )
         )
-
     elif isinstance(args, SmallWebRTCRunnerArguments):
         from pipecat.transports.base_transport import TransportParams
         from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
         logger.info(f"💻 Mode: SmallWebRTC (Local)")
-        
         transport = SmallWebRTCTransport(
             webrtc_connection=args.webrtc_connection,
             params=TransportParams(
@@ -195,7 +226,26 @@ async def bot(args: RunnerArguments):
         )
 
     # --- LLM SETUP ---
-    combined_system_prompt = SYSTEM_PROMPT + VISUAL_INSTRUCTIONS
+    combined_system_prompt = SYSTEM_PROMPT + VISUAL_INSTRUCTIONS + """
+# VIDEO CONTROL RULES
+
+1. COMPOUND COMMANDS (CRITICAL):
+   - If user says "Restart and play at 2x", you must trigger BOTH.
+   - You MUST verbally confirm the specifics to trigger the controls.
+   - Say: "Restarting video at 2x." (This phrase triggers the actions).
+
+2. SPEED HANDLING:
+   - If user asks for specific speed (e.g. 2x, 0.5x), DO NOT say generic phrases like "Speeding up".
+   - You MUST say the specific number: "Playing at 2x" or "Playing at 0.5x".
+   - This exact phrasing is required to make the video player work.
+
+TRIGGER PHRASES (Speak these exactly):
+- "Pausing video"
+- "Resuming video"
+- "Restarting video"
+- "Playing at 2x" 
+- "Playing at 0.5x"
+"""
 
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
@@ -212,10 +262,7 @@ async def bot(args: RunnerArguments):
         system_instruction=combined_system_prompt,
         tools=tools,
         params=InputParams(
-            generation_config={
-                "response_modalities": ["AUDIO"],
-                "temperature": 0.0,
-            },
+            generation_config={"response_modalities": ["AUDIO"], "temperature": 0.0},
             safety_settings=safety_settings
         )
     )
@@ -227,10 +274,12 @@ async def bot(args: RunnerArguments):
     rtvi = RTVIProcessor(config=RTVIConfig(config=[], enable_bot_ready_message=True))
     
     fallback_processor = IntentFallbackProcessor()
+    client_state_notifier = ClientStateNotifier() 
 
     pipeline = Pipeline([
         transport.input(), 
         rtvi, 
+        client_state_notifier, 
         user_aggregator, 
         llm, 
         fallback_processor, 
@@ -245,31 +294,22 @@ async def bot(args: RunnerArguments):
         keyword = params.arguments.get("keyword", "").lower()
         image_url = get_image_url(keyword)
         logger.info(f"🎨 Tool Triggered: show_image ({keyword})")
-        
         try:
-            frame = DailyOutputTransportMessageFrame(
-                message={"event": "show_image", "url": image_url}
-            )
-            await transport.output().process_frame(frame, FrameDirection.DOWNSTREAM)
+            msg = {"event": "show_image", "url": image_url}
+            await transport.output().process_frame(DailyOutputTransportMessageFrame(message=msg), FrameDirection.DOWNSTREAM)
         except Exception as e:
             logger.error(f"❌ Failed to send frame: {e}")
-        
         return f"Displaying image for {keyword}."
 
     async def show_video_handler(params: FunctionCallParams):
         keyword = params.arguments.get("keyword", "skiing").lower()
         video_url = get_video_url(keyword)
-        
         if not video_url:
-            logger.warning(f"⚠️ Video keyword '{keyword}' not found. Defaulting to skiing.")
             video_url = get_video_url("skiing")
-
-        logger.info(f"🎬 Tool Triggered: show_video ({keyword}) -> {video_url}")
+        logger.info(f"🎬 Tool Triggered: show_video ({keyword})")
         try:
-            frame = DailyOutputTransportMessageFrame(
-                message={"event": "show_video", "url": video_url}
-            )
-            await transport.output().process_frame(frame, FrameDirection.DOWNSTREAM)
+            msg = {"event": "show_video", "url": video_url}
+            await transport.output().process_frame(DailyOutputTransportMessageFrame(message=msg), FrameDirection.DOWNSTREAM)
         except Exception as e:
             logger.error(f"❌ Failed to send frame: {e}")
         return f"Video displayed on screen."
@@ -277,42 +317,73 @@ async def bot(args: RunnerArguments):
     async def close_image_handler(params: FunctionCallParams):
         logger.info("❌ Tool Triggered: close_image")
         try:
-            frame = DailyOutputTransportMessageFrame(
-                message={"event": "close_image"}
-            )
-            await transport.output().process_frame(frame, FrameDirection.DOWNSTREAM)
+            msg = {"event": "close_image"}
+            await transport.output().process_frame(DailyOutputTransportMessageFrame(message=msg), FrameDirection.DOWNSTREAM)
         except Exception as e:
             logger.error(f"❌ Failed to send frame: {e}")
         return "Media closed."
 
     async def control_video_handler(params: FunctionCallParams):
         action = params.arguments.get("action")
-        logger.info(f"🎬 Tool Triggered: control_video -> {action}")
+        value = params.arguments.get("value")
+        
+        logger.info(f"🎬 Tool Triggered: control_video -> {action} ({value})")
+        
+        msg = {"event": "video_control", "command": action, "source": "tool_call"}
+        if value is not None:
+            msg["value"] = value
+
         try:
-            frame = DailyOutputTransportMessageFrame(
-                message={
-                    "event": "video_control", 
-                    "command": action,
-                    "source": "tool_call"
-                }
-            )
-            await transport.output().process_frame(frame, FrameDirection.DOWNSTREAM)
+            await transport.output().process_frame(DailyOutputTransportMessageFrame(message=msg), FrameDirection.DOWNSTREAM)
         except Exception as e:
             logger.error(f"❌ Failed to send video control frame: {e}")
+        
+        if action == "seek":
+            direction = "back" if value < 0 else "forward"
+            return f"Skipping {direction} {abs(value)} seconds."
+        elif action == "speed":
+            return f"Setting playback speed to {value}x."
+        
         return f"Video {action} command sent."
 
-    # REGISTER FUNCTIONS
     llm.register_function("show_image", show_image_handler, cancel_on_interruption=False)
     llm.register_function("show_video", show_video_handler, cancel_on_interruption=False)
     llm.register_function("close_image", close_image_handler, cancel_on_interruption=False)
     llm.register_function("control_video", control_video_handler, cancel_on_interruption=False)
+
+    # --- APP MESSAGE HANDLER (Video End) ---
+    @transport.event_handler("on_app_message")
+    async def on_app_message(transport, message, sender):
+        if message.get("event") == "video_ended":
+            logger.info("🎬 Video finished. Forcing conversation.")
+            
+            # FIXED: We use the "USER" role to impersonate the user asking "What now?".
+            # This forces Gemini (the model) to generate an audio response.
+            # Using TTSSpeakFrame failed because we don't have a TTS service.
+            await task.queue_frames([
+                LLMMessagesAppendFrame(
+                    messages=[{
+                        "role": "user", 
+                        "content": "The video just finished playing on the screen. Please announce that it is done and ask me if I want to replay it or move on."
+                    }],
+                    run_llm=True 
+                )
+            ])
+            
+        elif message.get("event") == "video_error":
+            logger.error("❌ Video failed.")
+            await task.queue_frames([
+                LLMMessagesAppendFrame(
+                    messages=[{"role": "user", "content": "The video failed to load. Please apologize."}],
+                    run_llm=True
+                )
+            ])
 
     # --- GREETING & RUNNER ---
     async def trigger_greeting():
         nonlocal greeting_triggered
         if greeting_triggered: return
         greeting_triggered = True
-        
         await task.queue_frames([
             LLMMessagesAppendFrame(
                 messages=[{"role": "user", "content": f"Please say exactly this text: {GREETING_TEXT}"}],

@@ -22,7 +22,7 @@
             transform: translate(-50%, -50%);
             width: 80%; max-width: 800px;
             
-            /* --- HEIGHT CONSTRAINTS (New) --- */
+            /* --- HEIGHT CONSTRAINTS --- */
             /* Never taller than 700px OR 90% of the viewport, whichever is smaller */
             max-height: min(700px, 90vh);
             
@@ -35,6 +35,10 @@
             flex-direction: column;
             align-items: center;
             
+            /* Transition for Visual Listening Cue */
+            transition: border 0.2s ease-in-out;
+            border: 4px solid transparent; 
+            
             /* Ensure content respects the rounded corners and doesn't spill */
             overflow: hidden;
             /* Allow vertical scrolling only if absolutely necessary (e.g. tiny screens) */
@@ -42,7 +46,7 @@
         }
 
         #instructional-image, #instructional-video {
-            /* --- MEDIA SCALING (New) --- */
+            /* --- MEDIA SCALING --- */
             /* Reset width to auto to preserve aspect ratio */
             width: auto;
             max-width: 100%;
@@ -92,7 +96,7 @@
     <div id="media-overlay">
         <img id="instructional-image" src="" alt="Instructional Aid" />
         
-        <video id="instructional-video" controls>
+        <video id="instructional-video" playsinline>
             <source src="" type="video/mp4">
             Your browser does not support the video tag.
         </video>
@@ -111,6 +115,32 @@
         let lastCommandTime = 0;
         const DEBOUNCE_MS = 1000; 
 
+        // --- AUDIO FADER (For Ducking) ---
+        // Smoothly fades volume to target to prevent jarring cuts
+        function fadeVolume(element, targetVolume) {
+            if (!element) return;
+            const step = 0.1;
+            const fade = setInterval(() => {
+                if (!element || element.paused) {
+                    clearInterval(fade);
+                    return;
+                }
+                
+                let current = element.volume;
+                // If we are close enough, set exact and stop
+                if (Math.abs(current - targetVolume) < step) {
+                    element.volume = targetVolume;
+                    clearInterval(fade);
+                } else if (current > targetVolume) {
+                    // Fading Out
+                    element.volume = Math.max(0, current - step);
+                } else {
+                    // Fading In
+                    element.volume = Math.min(1, current + step);
+                }
+            }, 50); // 50ms steps
+        }
+
         async function startCall() {
             callFrame = window.DailyIframe.createFrame(
                 document.getElementById('call-container'), {
@@ -119,13 +149,33 @@
                 }
             );
 
-            // LISTENER: Watch for the Agent's signal
+            // --- VIDEO EVENT LISTENERS ---
+            const vid = document.getElementById('instructional-video');
+            
+            // 1. Notify Bot when video ends (Turn-Taking)
+            vid.onended = () => {
+                console.log("🎬 Video finished");
+                if (callFrame) {
+                    callFrame.sendAppMessage({ event: "video_ended", src: vid.src });
+                }
+            };
+
+            // 2. Notify Bot on error
+            vid.onerror = () => {
+                console.error("❌ Video error");
+                if (callFrame) {
+                    callFrame.sendAppMessage({ event: "video_error" });
+                }
+            };
+
+            // LISTENER: Watch for the Agent's signals
             callFrame.on('app-message', (e) => {
                 if (!e.data) return;
                 
                 console.log("Received app-message:", e.data);
                 updateStatus(`Received: ${e.data.event} ${e.data.command || ''}`);
 
+                // --- MEDIA DISPLAY ---
                 if (e.data.event === 'show_image') {
                     showImage(e.data.url);
                 }
@@ -139,8 +189,29 @@
                     closeOverlay();
                 }
 
+                // --- VIDEO CONTROLS ---
                 if (e.data.event === 'video_control') {
-                    handleVideoControl(e.data.command);
+                    // Pass the optional 'value' (for seek/speed) to the handler
+                    handleVideoControl(e.data.command, e.data.value);
+                }
+
+                // --- AUDIO DUCKING (UX Optimization) ---
+                if (e.data.event === 'user_speaking_status') {
+                    const overlay = document.getElementById('media-overlay');
+                    // Only duck/restore if video is actually visible and playing
+                    if (overlay.style.display !== 'none' && !vid.paused) {
+                        if (e.data.status === 'speaking') {
+                            console.log("User speaking -> Ducking volume");
+                            fadeVolume(vid, 0.2); // Duck to 20%
+                            // Visual Cue: Green Border
+                            overlay.style.border = "4px solid #00ff00";
+                        } else {
+                            console.log("User stopped -> Restoring volume");
+                            fadeVolume(vid, 1.0); // Restore to 100%
+                            // Visual Cue: Remove Border
+                            overlay.style.border = "4px solid transparent";
+                        }
+                    }
                 }
             });
 
@@ -153,7 +224,7 @@
         }
 
         // --- VIDEO CONTROL LOGIC ---
-        function handleVideoControl(command) {
+        function handleVideoControl(command, value) {
             const video = document.getElementById('instructional-video');
             const overlay = document.getElementById('media-overlay');
             
@@ -183,6 +254,22 @@
                 case 'unmute':
                     video.muted = false;
                     break;
+                
+                // --- NEW: Granular Controls ---
+                case 'seek':
+                    if (value) {
+                        // Value is seconds (negative for back, positive for forward)
+                        video.currentTime += value;
+                    }
+                    break;
+                case 'speed':
+                    if (value) {
+                        // Value is playback rate (e.g. 0.5, 1.5, 2.0)
+                        video.playbackRate = value;
+                    }
+                    break;
+
+                // --- Legacy Fallbacks (if LLM doesn't use seek) ---
                 case 'skip':
                 case 'forward':
                     if (now - lastCommandTime > DEBOUNCE_MS) {
@@ -226,6 +313,11 @@
             if (url) {
                 vid.src = url;
             }
+            
+            // Reset state for new video
+            vid.volume = 1.0;
+            vid.playbackRate = 1.0; 
+            
             vid.play().catch(e => console.log("Auto-play blocked:", e));
             
             box.style.display = 'flex';
