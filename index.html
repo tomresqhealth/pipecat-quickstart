@@ -3,29 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quadriga Agent (Dynamic Video)</title>
+    <title>Quadriga Agent (Super-Zoom Architecture)</title>
     <script src="https://unpkg.com/@daily-co/daily-js"></script>
     <style>
         body { margin: 0; font-family: sans-serif; background: #222; color: white; overflow: hidden; }
         
-        /* The Video Container */
-        #call-container {
-            width: 100vw; height: 100vh;
-            position: relative;
-        }
+        #call-container { width: 100vw; height: 100vh; position: relative; }
 
-        /* The Content Overlay (Images & Video) */
         #media-overlay {
-            display: none; /* HIDDEN until triggered */
-            position: absolute;
+            display: none; position: absolute;
             top: 50%; left: 50%;
             transform: translate(-50%, -50%);
             width: 80%; max-width: 800px;
-            
-            /* --- HEIGHT CONSTRAINTS --- */
-            /* Never taller than 700px OR 90% of the viewport, whichever is smaller */
             max-height: min(700px, 90vh);
-            
             background: rgba(0,0,0,0.9);
             padding: 20px;
             border-radius: 12px;
@@ -34,57 +24,40 @@
             text-align: center;
             flex-direction: column;
             align-items: center;
-            
-            /* Transition for Visual Listening Cue */
             transition: border 0.2s ease-in-out;
             border: 4px solid transparent; 
-            
-            /* Ensure content respects the rounded corners and doesn't spill */
-            overflow: hidden;
-            /* Allow vertical scrolling only if absolutely necessary (e.g. tiny screens) */
-            overflow-y: auto; 
+            overflow: hidden; 
         }
 
         #instructional-image, #instructional-video {
-            /* --- MEDIA SCALING --- */
-            /* Reset width to auto to preserve aspect ratio */
-            width: auto;
-            max-width: 100%;
+            width: auto; max-width: 100%;
+            max-height: 550px; max-height: 60vh;
+            object-fit: contain; border-radius: 8px; 
+            display: none;
             
-            /* Constrain height to leave room for the 'Close' button */
-            /* (700px container - padding - button space ~= 550px max) */
-            max-height: 550px;
-            
-            /* Also constrain relative to viewport for small screens */
-            max-height: 60vh;
-            
-            object-fit: contain;
-            border-radius: 8px; 
-            display: none; /* Toggled via JS */
+            /* PERFORMANCE FIX: Forces browser to use GPU for 10x magnification */
+            image-rendering: high-quality;
+            will-change: transform, transform-origin;
+
+            /* SMOOTHING FIX: 0.4s cubic-bezier ensures rapid tool calls feel like a smooth pan */
+            transition: transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94), 
+                        transform-origin 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
         }
 
         #close-btn {
-            margin-top: 15px;
-            padding: 10px 20px;
-            background: #ff4444; 
-            color: white; 
-            border: none; 
-            border-radius: 4px; 
-            cursor: pointer;
-            font-size: 16px;
-            /* Prevent button from shrinking */
-            flex-shrink: 0;
+            margin-top: 15px; padding: 10px 20px;
+            background: #ff4444; color: white; 
+            border: none; border-radius: 4px; 
+            cursor: pointer; font-size: 16px;
+            flex-shrink: 0; z-index: 1001;
         }
         #close-btn:hover { background: #cc0000; }
         
-        /* Status indicator for voice commands */
         #status-log {
-            position: absolute;
-            bottom: 20px; right: 20px;
+            position: absolute; bottom: 20px; right: 20px;
             color: #aaa; font-size: 12px;
             background: rgba(0,0,0,0.5);
-            padding: 5px;
-            border-radius: 4px;
+            padding: 5px; border-radius: 4px;
             pointer-events: none;
         }
     </style>
@@ -95,12 +68,9 @@
 
     <div id="media-overlay">
         <img id="instructional-image" src="" alt="Instructional Aid" />
-        
         <video id="instructional-video" playsinline>
             <source src="" type="video/mp4">
-            Your browser does not support the video tag.
         </video>
-
         <br/>
         <button id="close-btn" onclick="closeOverlay()">Close Media</button>
     </div>
@@ -108,38 +78,8 @@
     <div id="status-log">Ready</div>
 
     <script>
-        // --- CONFIGURATION ---
         const ROOM_URL = "https://resqhealth.daily.co/quadriga-agent-test"; 
-
         let callFrame = null;
-        let lastCommandTime = 0;
-        const DEBOUNCE_MS = 1000; 
-
-        // --- AUDIO FADER (For Ducking) ---
-        // Smoothly fades volume to target to prevent jarring cuts
-        function fadeVolume(element, targetVolume) {
-            if (!element) return;
-            const step = 0.1;
-            const fade = setInterval(() => {
-                if (!element || element.paused) {
-                    clearInterval(fade);
-                    return;
-                }
-                
-                let current = element.volume;
-                // If we are close enough, set exact and stop
-                if (Math.abs(current - targetVolume) < step) {
-                    element.volume = targetVolume;
-                    clearInterval(fade);
-                } else if (current > targetVolume) {
-                    // Fading Out
-                    element.volume = Math.max(0, current - step);
-                } else {
-                    // Fading In
-                    element.volume = Math.min(1, current + step);
-                }
-            }, 50); // 50ms steps
-        }
 
         async function startCall() {
             callFrame = window.DailyIframe.createFrame(
@@ -149,66 +89,41 @@
                 }
             );
 
-            // --- VIDEO EVENT LISTENERS ---
             const vid = document.getElementById('instructional-video');
             
-            // 1. Notify Bot when video ends (Turn-Taking)
             vid.onended = () => {
-                console.log("🎬 Video finished");
-                if (callFrame) {
-                    callFrame.sendAppMessage({ event: "video_ended", src: vid.src });
-                }
+                if (callFrame) callFrame.sendAppMessage({ event: "video_ended" });
             };
 
-            // 2. Notify Bot on error
-            vid.onerror = () => {
-                console.error("❌ Video error");
-                if (callFrame) {
-                    callFrame.sendAppMessage({ event: "video_error" });
-                }
-            };
-
-            // LISTENER: Watch for the Agent's signals
             callFrame.on('app-message', (e) => {
                 if (!e.data) return;
-                
-                console.log("Received app-message:", e.data);
-                updateStatus(`Received: ${e.data.event} ${e.data.command || ''}`);
+                console.log("App Message:", e.data);
+                updateStatus(`Event: ${e.data.event}`);
 
-                // --- MEDIA DISPLAY ---
                 if (e.data.event === 'show_image') {
-                    showImage(e.data.url);
-                }
-
-                // Handle Dynamic Video URL
-                if (e.data.event === 'show_video') {
-                    showVideo(e.data.url); 
+                    showImage(e.data.url, e.data.zoom, e.data.pan_x, e.data.pan_y);
                 }
 
                 if (e.data.event === 'close_image') {
                     closeOverlay();
                 }
 
-                // --- VIDEO CONTROLS ---
-                if (e.data.event === 'video_control') {
-                    // Pass the optional 'value' (for seek/speed) to the handler
-                    handleVideoControl(e.data.command, e.data.value);
+                if (e.data.event === 'video_control' && e.data.command === 'pause') {
+                    vid.pause();
                 }
 
-                // --- AUDIO DUCKING (UX Optimization) ---
+                if (e.data.event === 'update_video_state') {
+                    handleAtomicVideoUpdate(e.data.state, e.data.url);
+                }
+
                 if (e.data.event === 'user_speaking_status') {
                     const overlay = document.getElementById('media-overlay');
-                    // Only duck/restore if video is actually visible and playing
                     if (overlay.style.display !== 'none' && !vid.paused) {
                         if (e.data.status === 'speaking') {
-                            console.log("User speaking -> Ducking volume");
-                            fadeVolume(vid, 0.2); // Duck to 20%
-                            // Visual Cue: Green Border
+                            vid.volume = 0.2;
                             overlay.style.border = "4px solid #00ff00";
                         } else {
-                            console.log("User stopped -> Restoring volume");
-                            fadeVolume(vid, 1.0); // Restore to 100%
-                            // Visual Cue: Remove Border
+                            vid.volume = 1.0;
                             overlay.style.border = "4px solid transparent";
                         }
                     }
@@ -217,124 +132,92 @@
 
             try {
                 await callFrame.join({ url: ROOM_URL });
-                console.log("Joined room:", ROOM_URL);
             } catch (err) {
-                console.error("Failed to join room. Check your ROOM_URL.", err);
+                console.error("Join failed:", err);
             }
         }
 
-        // --- VIDEO CONTROL LOGIC ---
-        function handleVideoControl(command, value) {
+        function handleAtomicVideoUpdate(state, url) {
             const video = document.getElementById('instructional-video');
             const overlay = document.getElementById('media-overlay');
-            
-            // Ensure video is visible if we are controlling it
-            if (overlay.style.display === 'none') {
-                console.warn("Received control command but video is hidden.");
-                return;
-            }
+            const image = document.getElementById('instructional-image');
 
-            const now = Date.now();
-
-            switch (command) {
-                case 'pause':
-                    video.pause();
-                    break;
-                case 'play':
-                case 'resume': 
-                    video.play();
-                    break;
-                case 'restart':  // Handle Restart
-                    video.currentTime = 0;
-                    video.play();
-                    break;
-                case 'mute':
-                    video.muted = true;
-                    break;
-                case 'unmute':
-                    video.muted = false;
-                    break;
-                
-                // --- NEW: Granular Controls ---
-                case 'seek':
-                    if (value) {
-                        // Value is seconds (negative for back, positive for forward)
-                        video.currentTime += value;
-                    }
-                    break;
-                case 'speed':
-                    if (value) {
-                        // Value is playback rate (e.g. 0.5, 1.5, 2.0)
-                        video.playbackRate = value;
-                    }
-                    break;
-
-                // --- Legacy Fallbacks (if LLM doesn't use seek) ---
-                case 'skip':
-                case 'forward':
-                    if (now - lastCommandTime > DEBOUNCE_MS) {
-                        video.currentTime += 10;
-                        lastCommandTime = now;
-                    } 
-                    break;
-                case 'rewind':
-                case 'back':
-                    if (now - lastCommandTime > DEBOUNCE_MS) {
-                        video.currentTime -= 10;
-                        lastCommandTime = now;
-                    } 
-                    break;
+            if (url && video.src !== url) {
+                image.style.display = 'none';
+                video.style.display = 'block';
+                video.src = url;
+                overlay.style.display = 'flex'; 
+                video.onloadedmetadata = () => applySynchronousState(video, state);
+            } else if (overlay.style.display !== 'none') {
+                applySynchronousState(video, state);
             }
         }
 
-        // --- UI HELPERS ---
-        function showImage(url) {
+        function applySynchronousState(video, state) {
+            console.log("Applying State:", state);
+
+            // 1. Time Synchronization
+            if (state.time_abs !== undefined && state.time_abs !== null) {
+                video.currentTime = state.time_abs;
+            } else if (state.time_rel) {
+                video.currentTime += state.time_rel;
+            }
+
+            // 2. Audio Control (Mute + Precision Volume)
+            if (state.muted !== undefined) video.muted = state.muted;
+            if (state.volume !== undefined) video.volume = state.volume;
+
+            // 3. Speed Control
+            if (state.speed) video.playbackRate = state.speed;
+
+            // 4. COORDINATE PANNING & ZOOM
+            if (state.zoom !== undefined || state.pan_x !== undefined) {
+                const z = state.zoom || 1.0;
+                const px = state.pan_x !== undefined ? state.pan_x : 50;
+                const py = state.pan_y !== undefined ? state.pan_y : 50;
+                video.style.transformOrigin = `${px}% ${py}%`;
+                video.style.transform = `scale(${z})`;
+            }
+
+            // 5. Playback State
+            if (state.playing === true) {
+                video.play().catch(e => console.warn("Autoplay blocked:", e));
+            } else if (state.playing === false) {
+                video.pause();
+            }
+        }
+
+        function showImage(url, zoom = 1.0, pan_x = 50, pan_y = 50) {
             const box = document.getElementById('media-overlay');
             const img = document.getElementById('instructional-image');
             const vid = document.getElementById('instructional-video');
-            
-            // Stop any playing video
             vid.pause();
             vid.style.display = 'none';
-
             img.src = url;
             img.style.display = 'block';
+
+            // ATOMIC TRANSFORMATION: Set origin and scale together for smooth panning
+            img.style.transformOrigin = `${pan_x}% ${pan_y}%`;
+            img.style.transform = `scale(${zoom})`;
+
             box.style.display = 'flex'; 
         }
 
-        function showVideo(url) {
-            const box = document.getElementById('media-overlay');
+        function closeOverlay() {
+            const overlay = document.getElementById('media-overlay');
             const img = document.getElementById('instructional-image');
             const vid = document.getElementById('instructional-video');
-
-            img.style.display = 'none';
-            vid.style.display = 'block';
-            
-            if (url) {
-                vid.src = url;
-            }
-            
-            // Reset state for new video
-            vid.volume = 1.0;
-            vid.playbackRate = 1.0; 
-            
-            vid.play().catch(e => console.log("Auto-play blocked:", e));
-            
-            box.style.display = 'flex';
-        }
-
-        function closeOverlay() {
-            const box = document.getElementById('media-overlay');
-            const vid = document.getElementById('instructional-video');
-            
             vid.pause();
-            box.style.display = 'none';
+            // Reset transforms so next load doesn't start from an offset
+            img.style.transform = 'scale(1.0)';
+            img.style.transformOrigin = '50% 50%';
+            vid.style.transform = 'scale(1.0)';
+            vid.style.transformOrigin = '50% 50%';
+            overlay.style.display = 'none';
         }
         
         function updateStatus(text) {
-            const el = document.getElementById('status-log');
-            el.textContent = text;
-            setTimeout(() => el.textContent = "Ready", 3000);
+            document.getElementById('status-log').textContent = text;
         }
 
         startCall();

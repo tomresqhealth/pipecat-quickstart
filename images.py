@@ -17,6 +17,10 @@ IMAGE_DATABASE = {
     "headshot": {
         "url": "https://nutum.ai/wp-content/uploads/2025/03/tom-headshot-2024.jpeg",
         "description": "A professional headshot of Tom Elliott wearing a blue vest. Use this when the user asks who Tom is, what he looks like, or for a professional photo."
+    },
+    "westeros_map": {
+        "url": "https://nutum.ai/wp-content/uploads/2026/02/westeros.jpg",
+        "description": "A highly detailed map of Westeros from Game of Thrones. Use this for testing extreme zoom and panning capabilities, or if the user asks about fantasy maps and geography."
     }
 }
 
