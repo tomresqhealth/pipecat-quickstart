@@ -3,19 +3,28 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quadriga Agent (Super-Zoom Architecture)</title>
+    <title>Quadriga Agent (Atomic Architecture)</title>
     <script src="https://unpkg.com/@daily-co/daily-js"></script>
     <style>
         body { margin: 0; font-family: sans-serif; background: #222; color: white; overflow: hidden; }
         
-        #call-container { width: 100vw; height: 100vh; position: relative; }
+        /* The Video Container */
+        #call-container {
+            width: 100vw; height: 100vh;
+            position: relative;
+        }
 
+        /* The Content Overlay (Images & Video) */
         #media-overlay {
-            display: none; position: absolute;
+            display: none; /* HIDDEN until triggered */
+            position: absolute;
             top: 50%; left: 50%;
             transform: translate(-50%, -50%);
             width: 80%; max-width: 800px;
+            
+            /* HEIGHT CONSTRAINTS */
             max-height: min(700px, 90vh);
+            
             background: rgba(0,0,0,0.9);
             padding: 20px;
             border-radius: 12px;
@@ -24,40 +33,44 @@
             text-align: center;
             flex-direction: column;
             align-items: center;
+            
             transition: border 0.2s ease-in-out;
             border: 4px solid transparent; 
-            overflow: hidden; 
+            
+            overflow: hidden;
+            overflow-y: auto; 
         }
 
         #instructional-image, #instructional-video {
-            width: auto; max-width: 100%;
-            max-height: 550px; max-height: 60vh;
-            object-fit: contain; border-radius: 8px; 
-            display: none;
-            
-            /* PERFORMANCE FIX: Forces browser to use GPU for 10x magnification */
-            image-rendering: high-quality;
-            will-change: transform, transform-origin;
-
-            /* SMOOTHING FIX: 0.4s cubic-bezier ensures rapid tool calls feel like a smooth pan */
-            transition: transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94), 
-                        transform-origin 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            width: auto;
+            max-width: 100%;
+            max-height: 550px;
+            max-height: 60vh;
+            object-fit: contain;
+            border-radius: 8px; 
+            display: none; 
         }
 
         #close-btn {
-            margin-top: 15px; padding: 10px 20px;
-            background: #ff4444; color: white; 
-            border: none; border-radius: 4px; 
-            cursor: pointer; font-size: 16px;
-            flex-shrink: 0; z-index: 1001;
+            margin-top: 15px;
+            padding: 10px 20px;
+            background: #ff4444; 
+            color: white; 
+            border: none; 
+            border-radius: 4px; 
+            cursor: pointer;
+            font-size: 16px;
+            flex-shrink: 0;
         }
         #close-btn:hover { background: #cc0000; }
         
         #status-log {
-            position: absolute; bottom: 20px; right: 20px;
+            position: absolute;
+            bottom: 20px; right: 20px;
             color: #aaa; font-size: 12px;
             background: rgba(0,0,0,0.5);
-            padding: 5px; border-radius: 4px;
+            padding: 5px;
+            border-radius: 4px;
             pointer-events: none;
         }
     </style>
@@ -68,9 +81,12 @@
 
     <div id="media-overlay">
         <img id="instructional-image" src="" alt="Instructional Aid" />
+        
         <video id="instructional-video" playsinline>
             <source src="" type="video/mp4">
+            Your browser does not support the video tag.
         </video>
+
         <br/>
         <button id="close-btn" onclick="closeOverlay()">Close Media</button>
     </div>
@@ -91,31 +107,39 @@
 
             const vid = document.getElementById('instructional-video');
             
+            // Turn-Taking Notification
             vid.onended = () => {
-                if (callFrame) callFrame.sendAppMessage({ event: "video_ended" });
+                console.log("🎬 Video finished");
+                if (callFrame) {
+                    callFrame.sendAppMessage({ event: "video_ended" });
+                }
             };
 
             callFrame.on('app-message', (e) => {
                 if (!e.data) return;
-                console.log("App Message:", e.data);
+                
+                console.log("Received app-message:", e.data);
                 updateStatus(`Event: ${e.data.event}`);
 
                 if (e.data.event === 'show_image') {
-                    showImage(e.data.url, e.data.zoom, e.data.pan_x, e.data.pan_y);
+                    showImage(e.data.url);
                 }
 
                 if (e.data.event === 'close_image') {
                     closeOverlay();
                 }
 
+                // 1. PANIC BUTTON: Low-latency stop
                 if (e.data.event === 'video_control' && e.data.command === 'pause') {
                     vid.pause();
                 }
 
+                // 2. ATOMIC TRANSACTION: Unified state updates
                 if (e.data.event === 'update_video_state') {
                     handleAtomicVideoUpdate(e.data.state, e.data.url);
                 }
 
+                // Audio Ducking (UX Optimization)
                 if (e.data.event === 'user_speaking_status') {
                     const overlay = document.getElementById('media-overlay');
                     if (overlay.style.display !== 'none' && !vid.paused) {
@@ -133,61 +157,63 @@
             try {
                 await callFrame.join({ url: ROOM_URL });
             } catch (err) {
-                console.error("Join failed:", err);
+                console.error("Failed to join room.", err);
             }
         }
 
+        // PERFECTED ATOMIC STATE MANAGEMENT
         function handleAtomicVideoUpdate(state, url) {
             const video = document.getElementById('instructional-video');
             const overlay = document.getElementById('media-overlay');
             const image = document.getElementById('instructional-image');
 
+            // 1. Handle New Media Source / Visibility
             if (url && video.src !== url) {
+                console.log("Atomic: Loading new source", url);
                 image.style.display = 'none';
                 video.style.display = 'block';
                 video.src = url;
-                overlay.style.display = 'flex'; 
+                overlay.style.display = 'flex'; // Unhide automatically
+                
+                // WAIT FOR METADATA: Fixes "video didn't move" error
                 video.onloadedmetadata = () => applySynchronousState(video, state);
             } else if (overlay.style.display !== 'none') {
+                // Apply immediately to already-loaded video
                 applySynchronousState(video, state);
             }
         }
 
         function applySynchronousState(video, state) {
-            console.log("Applying State:", state);
+            console.log("Syncing State Transaction:", state);
 
-            // 1. Time Synchronization
+            // ORDER MATTERS: Time -> Speed -> Muted -> Play/Pause
+            
+            // 1. Time (Absolute has priority over Relative)
             if (state.time_abs !== undefined && state.time_abs !== null) {
                 video.currentTime = state.time_abs;
-            } else if (state.time_rel) {
+            } else if (state.time_rel !== undefined && state.time_rel !== null) {
                 video.currentTime += state.time_rel;
             }
 
-            // 2. Audio Control (Mute + Precision Volume)
-            if (state.muted !== undefined) video.muted = state.muted;
-            if (state.volume !== undefined) video.volume = state.volume;
-
-            // 3. Speed Control
-            if (state.speed) video.playbackRate = state.speed;
-
-            // 4. COORDINATE PANNING & ZOOM
-            if (state.zoom !== undefined || state.pan_x !== undefined) {
-                const z = state.zoom || 1.0;
-                const px = state.pan_x !== undefined ? state.pan_x : 50;
-                const py = state.pan_y !== undefined ? state.pan_y : 50;
-                video.style.transformOrigin = `${px}% ${py}%`;
-                video.style.transform = `scale(${z})`;
+            // 2. Speed
+            if (state.speed !== undefined && state.speed !== null) {
+                video.playbackRate = state.speed;
             }
 
-            // 5. Playback State
+            // 3. Mute
+            if (state.muted !== undefined && state.muted !== null) {
+                video.muted = state.muted;
+            }
+
+            // 4. Play/Pause State Last
             if (state.playing === true) {
-                video.play().catch(e => console.warn("Autoplay blocked:", e));
+                video.play().catch(e => console.warn("Auto-play blocked:", e));
             } else if (state.playing === false) {
                 video.pause();
             }
         }
 
-        function showImage(url, zoom = 1.0, pan_x = 50, pan_y = 50) {
+        function showImage(url) {
             const box = document.getElementById('media-overlay');
             const img = document.getElementById('instructional-image');
             const vid = document.getElementById('instructional-video');
@@ -195,24 +221,13 @@
             vid.style.display = 'none';
             img.src = url;
             img.style.display = 'block';
-
-            // ATOMIC TRANSFORMATION: Set origin and scale together for smooth panning
-            img.style.transformOrigin = `${pan_x}% ${pan_y}%`;
-            img.style.transform = `scale(${zoom})`;
-
             box.style.display = 'flex'; 
         }
 
         function closeOverlay() {
             const overlay = document.getElementById('media-overlay');
-            const img = document.getElementById('instructional-image');
             const vid = document.getElementById('instructional-video');
             vid.pause();
-            // Reset transforms so next load doesn't start from an offset
-            img.style.transform = 'scale(1.0)';
-            img.style.transformOrigin = '50% 50%';
-            vid.style.transform = 'scale(1.0)';
-            vid.style.transformOrigin = '50% 50%';
             overlay.style.display = 'none';
         }
         
